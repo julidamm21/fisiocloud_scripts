@@ -7,6 +7,8 @@ Scripts de base de datos y arranque de la aplicación (independientes de la infr
 | `fisiocloud_init.sql` | Crea BDs, tablas, seeds y catálogos del sistema anterior |
 | `fisiocloud_setup.sh` | Configura nginx y arranca los microservicios Python |
 
+Las pruebas E2E viven en el repo/carpeta `test/` (`../test/`).
+
 ## Base de datos
 
 ```bash
