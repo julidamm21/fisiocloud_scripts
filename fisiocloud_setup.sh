@@ -26,8 +26,9 @@ export JWT_SECRET="${JWT_SECRET:-fisiocloud-dev-secret-change-me}"
 export SEGURIDAD_URL="${SEGURIDAD_URL:-http://127.0.0.1:8101}"
 export SUSCRIPCION_URL="${SUSCRIPCION_URL:-http://127.0.0.1:8102}"
 export INFO_MEDICA_URL="${INFO_MEDICA_URL:-http://127.0.0.1:8103}"
-export AGENDAMIENTO_URL="${AGENDAMIENTO_URL:-http://127.0.0.1:8104}"
-export PARAMETRIZACION_URL="${PARAMETRIZACION_URL:-http://127.0.0.1:8105}"
+# Alias BC: agenda y catálogos viven en info_medica (:8103)
+export AGENDAMIENTO_URL="${AGENDAMIENTO_URL:-${INFO_MEDICA_URL}}"
+export PARAMETRIZACION_URL="${PARAMETRIZACION_URL:-${INFO_MEDICA_URL}}"
 export TRATAMIENTO_CASA_URL="${TRATAMIENTO_CASA_URL:-http://127.0.0.1:8106}"
 export SOPORTE_URL="${SOPORTE_URL:-http://127.0.0.1:8107}"
 export PROCESOS_AUTOMATICOS_URL="${PROCESOS_AUTOMATICOS_URL:-http://127.0.0.1:8108}"
@@ -71,8 +72,6 @@ upstream fisiocloud_frontend { server 127.0.0.1:8000; }
 upstream svc_seguridad { server 127.0.0.1:8101; }
 upstream svc_suscripcion { server 127.0.0.1:8102; }
 upstream svc_info_medica { server 127.0.0.1:8103; }
-upstream svc_agendamiento { server 127.0.0.1:8104; }
-upstream svc_parametrizacion { server 127.0.0.1:8105; }
 upstream svc_tratamiento_casa { server 127.0.0.1:8106; }
 upstream svc_soporte { server 127.0.0.1:8107; }
 upstream svc_procesos_automaticos { server 127.0.0.1:8108; }
@@ -115,13 +114,22 @@ server {
         proxy_pass http://svc_info_medica/;
         include /etc/nginx/fisiocloud_proxy_params.conf;
     }
+    # Alias BC: agenda + catálogos → info_medica
     location /svc/agendamiento/ {
-        proxy_pass http://svc_agendamiento/;
+        proxy_pass http://svc_info_medica/;
         include /etc/nginx/fisiocloud_proxy_params.conf;
     }
     location /svc/parametrizacion/ {
-        proxy_pass http://svc_parametrizacion/;
+        proxy_pass http://svc_info_medica/;
         include /etc/nginx/fisiocloud_proxy_params.conf;
+    }
+    # Imágenes de ejercicios: disco compartido (no pasan por Gunicorn)
+    # Archivos en ${APP_ROOT}/media/ejercicios/...
+    location /svc/tratamiento-casa/media/ {
+        alias ${APP_ROOT}/media/;
+        expires 7d;
+        add_header Cache-Control "public";
+        access_log off;
     }
     location /svc/tratamiento-casa/ {
         proxy_pass http://svc_tratamiento_casa/;
@@ -173,9 +181,8 @@ start_svc() {
   echo "Iniciando ${name} en :${port}"
   (
     cd "${APP_ROOT}/${dir}"
-    # Esquema ya viene de fisiocloud_init.sql
-    python3 manage.py migrate --noinput --fake 2>/dev/null \
-      || python3 manage.py migrate --noinput || true
+    # Aplicar migraciones reales (no --fake: dejaba django_session/contenttypes sin tablas)
+    python3 manage.py migrate --noinput || true
     python3 manage.py runserver "0.0.0.0:${port}"
   ) &
   PIDS+=($!)
@@ -188,8 +195,6 @@ setup_nginx
 start_svc backend_seguridad 8101 seguridad
 start_svc backend_suscripcion 8102 suscripcion
 start_svc backend_info_medica 8103 info_medica
-start_svc backend_agendamiento 8104 agendamiento
-start_svc backend_parametrizacion 8105 parametrizacion
 start_svc backend_tratamiento_casa 8106 tratamiento_casa
 start_svc backend_soporte 8107 soporte
 start_svc backend_procesos_automaticos 8108 procesos_automaticos

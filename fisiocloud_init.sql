@@ -15,8 +15,15 @@
 --   - migrate (usa --fake si corres migrate después)
 -- =============================================================================
 
+-- Ejecutar esto desde la consola
+-- GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'tu_contraseña_actual' WITH GRANT OPTION;
+-- FLUSH PRIVILEGES;
+
+
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
+
+SET SQL_SAFE_UPDATES = 0;
 
 -- -----------------------------------------------------------------------------
 -- Bases vacías + privilegios (equivalente al antiguo create_databases.sql)
@@ -26,10 +33,6 @@ CREATE DATABASE IF NOT EXISTS fisiocloud_seguridad
 CREATE DATABASE IF NOT EXISTS fisiocloud_suscripcion
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS fisiocloud_info_medica
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS fisiocloud_agendamiento
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE DATABASE IF NOT EXISTS fisiocloud_parametrizacion
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS fisiocloud_tratamiento_casa
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -44,8 +47,6 @@ CREATE USER IF NOT EXISTS 'fisiocloud'@'localhost' IDENTIFIED BY 'CAMBIAR_PASSWO
 GRANT ALL PRIVILEGES ON fisiocloud_seguridad.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_suscripcion.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_info_medica.* TO 'fisiocloud'@'localhost';
-GRANT ALL PRIVILEGES ON fisiocloud_agendamiento.* TO 'fisiocloud'@'localhost';
-GRANT ALL PRIVILEGES ON fisiocloud_parametrizacion.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_tratamiento_casa.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_soporte.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_procesos_automaticos.* TO 'fisiocloud'@'localhost';
@@ -53,8 +54,6 @@ GRANT ALL PRIVILEGES ON fisiocloud_asistente_voz.* TO 'fisiocloud'@'localhost';
 GRANT ALL PRIVILEGES ON fisiocloud_seguridad.* TO 'root'@'%';
 GRANT ALL PRIVILEGES ON fisiocloud_suscripcion.* TO 'root'@'%';
 GRANT ALL PRIVILEGES ON fisiocloud_info_medica.* TO 'root'@'%';
-GRANT ALL PRIVILEGES ON fisiocloud_agendamiento.* TO 'root'@'%';
-GRANT ALL PRIVILEGES ON fisiocloud_parametrizacion.* TO 'root'@'%';
 GRANT ALL PRIVILEGES ON fisiocloud_tratamiento_casa.* TO 'root'@'%';
 GRANT ALL PRIVILEGES ON fisiocloud_soporte.* TO 'root'@'%';
 GRANT ALL PRIVILEGES ON fisiocloud_procesos_automaticos.* TO 'root'@'%';
@@ -133,6 +132,39 @@ INSERT INTO sistema_config (id, otp_login_habilitado, actualizado)
 SELECT 1, 0, UTC_TIMESTAMP(6)
 WHERE NOT EXISTS (SELECT 1 FROM sistema_config WHERE id = 1);
 
+-- Usuario administrador inicial (login por email)
+-- email: fisiocloud.app@gmail.com  |  clave: Colombia2026.
+-- Hash: Django pbkdf2_sha256 (870000 iteraciones).
+INSERT INTO usuarios (
+  password, last_login, is_superuser, tipo_documento, doc_usuario,
+  nombre, apellido, email, telefono, rol, firma,
+  email_verificado, pending_plan_codigo, pending_segmento,
+  activo, is_staff, fecha_creacion, fecha_actualizacion
+)
+SELECT
+  'pbkdf2_sha256$870000$MZcp4VMoU8z7$BM3HqUMsHrscRkAB0I0yJZdgWDiGKo8Fe7XCWwTFmxM=',
+  NULL,
+  1,
+  'CC',
+  '90000001',
+  'Fisiocloud',
+  'Admin',
+  'fisiocloud.app@gmail.com',
+  '',
+  'ADMIN',
+  NULL,
+  1,
+  '',
+  '',
+  1,
+  1,
+  UTC_TIMESTAMP(6),
+  UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM usuarios
+  WHERE email = 'fisiocloud.app@gmail.com' OR doc_usuario = '90000001'
+);
+
 INSERT INTO django_migrations (app, name, applied)
 SELECT 'core', '0001_initial', UTC_TIMESTAMP(6)
 WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0001_initial');
@@ -206,10 +238,23 @@ CREATE TABLE IF NOT EXISTS planes (
   nombre VARCHAR(100) NOT NULL,
   descripcion LONGTEXT NOT NULL,
   dias_duracion INT UNSIGNED NOT NULL,
+  descuento_pct DECIMAL(5,2) NOT NULL DEFAULT 0.00,
   activo TINYINT(1) NOT NULL DEFAULT 1,
   orden SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   destacado TINYINT(1) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Upgrade si la tabla ya existía sin descuento_pct
+SET @col_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = 'fisiocloud_suscripcion'
+    AND TABLE_NAME = 'planes'
+    AND COLUMN_NAME = 'descuento_pct'
+);
+SET @sql := IF(@col_exists = 0,
+  'ALTER TABLE planes ADD COLUMN descuento_pct DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER dias_duracion',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS plan_tarifas (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -289,26 +334,30 @@ SELECT 'core', '0002_feature_menu_plan_destacado', UTC_TIMESTAMP(6)
 WHERE NOT EXISTS (
   SELECT 1 FROM django_migrations WHERE app='core' AND name='0002_feature_menu_plan_destacado'
 );
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0003_plan_descuento_pct', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0003_plan_descuento_pct'
+);
 
 -- -----------------------------------------------------------------------------
--- Datos iniciales (= seed_planes)
+-- Datos iniciales (= seed_planes): ESTANDAR/PLUS/PREMIUM × periodos + trial
 -- -----------------------------------------------------------------------------
 
 INSERT INTO features (codigo, nombre, descripcion, activo, icono, orden, ruta_web, ruta_app, mostrar_menu)
 VALUES
-('agenda', 'Agendamiento', 'Agenda de citas del terapeuta', 1, 'fas fa-calendar-alt', 10, 'agenda', '/app/agenda', 1),
-('pacientes', 'Gestión de pacientes', 'Alta y ficha de pacientes', 1, 'fas fa-user-injured', 20, 'pacientes', '/app/pacientes', 1),
-('valoraciones', 'Valoraciones clínicas', 'Formularios de valoración', 1, 'fas fa-stethoscope', 30, '', '', 0),
-('evoluciones', 'Evoluciones', 'Notas de evolución', 1, 'fas fa-notes-medical', 40, '', '', 0),
-('consentimiento', 'Consentimiento informado', 'Firma y consulta de consentimientos informados por especialidad', 1, 'fas fa-file-signature', 45, 'consentimientos', '/app/consentimientos', 1),
+('pacientes', 'Gestión de pacientes', 'Alta y ficha de pacientes', 1, 'fas fa-user-injured', 10, 'pacientes', '/app/pacientes', 1),
+('agenda', 'Agendamiento', 'Agenda de citas del terapeuta', 1, 'fas fa-calendar-alt', 20, 'agenda', '/app/agenda', 1),
+('valoraciones', 'Valoraciones clínicas', 'Formularios de valoración (parte de historia clínica)', 1, 'fas fa-stethoscope', 30, '', '', 0),
+('evoluciones', 'Evoluciones', 'Notas de evolución (parte de historia clínica)', 1, 'fas fa-notes-medical', 40, '', '', 0),
+('consentimiento', 'Consentimiento informado', 'Firma y consulta de consentimientos informados por especialidad', 1, 'fas fa-file-signature', 45, 'consentimientos', '/app/consentimientos', 0),
 ('asistente_voz', 'Asistente de voz HC', 'Diligenciamiento de historia clínica por voz (solo app móvil)', 1, 'fas fa-microphone-alt', 48, '', '/app/asistente-voz', 1),
-('facturacion', 'Facturación clínica', 'Cuentas de cobro', 1, 'fas fa-file-invoice-dollar', 50, 'cobro', '/app/cobro', 1),
+('facturacion', 'Facturación clínica', 'Cuentas de cobro', 1, 'fas fa-file-invoice-dollar', 50, 'cobro', '/app/cobro', 0),
+('historia_clinica', 'Historia clínica', 'Consulta y PDF de historia clínica', 1, 'fas fa-file-medical', 55, 'historia_clinica', '/app/historia', 0),
+('mis_tarifas', 'Mis tarifas', 'Tarifas del terapeuta por tipo de terapia', 1, 'fas fa-dollar-sign', 58, 'mis_tarifas', '/app/tarifas', 1),
 ('reportes_rips', 'Reportes RIPS', 'Reportes clínicos y RIPS', 1, 'fas fa-chart-bar', 60, 'reportes', '/app/reportes', 1),
 ('tratamiento_casa', 'Tratamiento en casa', 'Planes de ejercicios para el paciente', 1, 'fas fa-home', 70, 'planes_casa', '/app/planes-casa', 1),
-('app_movil', 'App móvil', 'Acceso a la app del terapeuta', 1, 'fas fa-mobile-alt', 80, '', '', 0),
-('multi_terapeuta', 'Múltiples terapeutas', 'Gestión de varios terapeutas', 1, 'fas fa-users', 90, '', '', 0),
-('recordatorio_agenda', 'Recordatorios de agenda', 'Envío automático de recordatorios de citas al paciente (configurable por el terapeuta)', 1, 'fas fa-bell', 100, 'mi_perfil', '/app/perfil', 0),
-('envio_hc_fin', 'Historia clínica al finalizar', 'Envío de historia clínica por correo al terminar el tratamiento (configurable por el terapeuta)', 1, 'fas fa-envelope-open-text', 110, 'mi_perfil', '/app/perfil', 0)
+('app_movil', 'App móvil', 'Acceso a la app del terapeuta', 1, 'fas fa-mobile-alt', 80, '', '', 0)
 ON DUPLICATE KEY UPDATE
   nombre=VALUES(nombre),
   descripcion=VALUES(descripcion),
@@ -319,81 +368,127 @@ ON DUPLICATE KEY UPDATE
   ruta_app=VALUES(ruta_app),
   mostrar_menu=VALUES(mostrar_menu);
 
-INSERT INTO planes (codigo, nombre, descripcion, dias_duracion, activo, orden, destacado)
+INSERT INTO planes (codigo, nombre, descripcion, dias_duracion, descuento_pct, activo, orden, destacado)
 VALUES
-('MENSUAL', 'Plan Mensual', 'Suscripción Plan Mensual Fisiocloud-IA', 30, 1, 1, 0),
-('SEMESTRAL', 'Plan Semestral', 'Suscripción Plan Semestral Fisiocloud-IA', 180, 1, 2, 0),
-('ANUAL', 'Plan Anual', 'Suscripción Plan Anual Fisiocloud-IA', 365, 1, 3, 1)
+-- Trial
+('PREMIUM_TRIAL', 'Trial Premium (15 días)', 'Trial Premium 15 días sin costo.', 15, 100.00, 1, 5, 0),
+-- Estándar
+('ESTANDAR', 'Plan Estándar Mensual', 'Plan Estándar Mensual. Vigencia 30 días.', 30, 0.00, 1, 10, 0),
+('ESTANDAR_SEMESTRAL', 'Plan Estándar Semestral', 'Plan Estándar Semestral. Vigencia 180 días, descuento 5%.', 180, 5.00, 1, 11, 0),
+('ESTANDAR_ANUAL', 'Plan Estándar Anual', 'Plan Estándar Anual. Vigencia 365 días, descuento 10%.', 365, 10.00, 1, 12, 0),
+-- Plus
+('PLUS', 'Plan Plus Mensual', 'Plan Plus Mensual. Vigencia 30 días.', 30, 0.00, 1, 20, 0),
+('PLUS_SEMESTRAL', 'Plan Plus Semestral', 'Plan Plus Semestral. Vigencia 180 días, descuento 5%.', 180, 5.00, 1, 21, 0),
+('PLUS_ANUAL', 'Plan Plus Anual', 'Plan Plus Anual. Vigencia 365 días, descuento 10%.', 365, 10.00, 1, 22, 0),
+-- Premium
+('PREMIUM', 'Plan Premium Mensual', 'Plan Premium Mensual. Vigencia 30 días.', 30, 0.00, 1, 30, 1),
+('PREMIUM_SEMESTRAL', 'Plan Premium Semestral', 'Plan Premium Semestral. Vigencia 180 días, descuento 5%.', 180, 5.00, 1, 31, 0),
+('PREMIUM_ANUAL', 'Plan Premium Anual', 'Plan Premium Anual. Vigencia 365 días, descuento 10%.', 365, 10.00, 1, 32, 0)
 ON DUPLICATE KEY UPDATE
   nombre=VALUES(nombre),
   descripcion=VALUES(descripcion),
   dias_duracion=VALUES(dias_duracion),
+  descuento_pct=VALUES(descuento_pct),
   activo=VALUES(activo),
   orden=VALUES(orden),
   destacado=VALUES(destacado);
 
--- Plan ↔ Feature (MENSUAL)
-INSERT INTO plan_features (plan_id, feature_id, habilitado)
-SELECT p.id, f.id, 1
-FROM planes p
-JOIN features f ON f.codigo IN ('agenda','pacientes','valoraciones','evoluciones','consentimiento')
-WHERE p.codigo = 'MENSUAL'
-ON DUPLICATE KEY UPDATE habilitado=1;
+-- Desactivar planes que ya no se ofrecen
+UPDATE planes SET activo=0, destacado=0
+WHERE codigo NOT IN (
+  'PREMIUM_TRIAL',
+  'ESTANDAR','ESTANDAR_SEMESTRAL','ESTANDAR_ANUAL',
+  'PLUS','PLUS_SEMESTRAL','PLUS_ANUAL',
+  'PREMIUM','PREMIUM_SEMESTRAL','PREMIUM_ANUAL'
+);
 
--- Plan ↔ Feature (SEMESTRAL)
-INSERT INTO plan_features (plan_id, feature_id, habilitado)
-SELECT p.id, f.id, 1
-FROM planes p
-JOIN features f ON f.codigo IN (
-  'agenda','pacientes','valoraciones','evoluciones','facturacion',
-  'tratamiento_casa','app_movil','recordatorio_agenda','consentimiento','asistente_voz'
-)
-WHERE p.codigo = 'SEMESTRAL'
-ON DUPLICATE KEY UPDATE habilitado=1;
-
--- Plan ↔ Feature (ANUAL)
+-- Features por familia
 INSERT INTO plan_features (plan_id, feature_id, habilitado)
 SELECT p.id, f.id, 1
 FROM planes p
 JOIN features f ON f.codigo IN (
-  'agenda','pacientes','valoraciones','evoluciones','facturacion','reportes_rips',
-  'tratamiento_casa','app_movil','multi_terapeuta','recordatorio_agenda',
-  'envio_hc_fin','consentimiento','asistente_voz'
+  'agenda','pacientes','valoraciones','evoluciones','consentimiento',
+  'facturacion','historia_clinica','mis_tarifas','reportes_rips'
 )
-WHERE p.codigo = 'ANUAL'
+WHERE p.codigo IN ('ESTANDAR','ESTANDAR_SEMESTRAL','ESTANDAR_ANUAL')
 ON DUPLICATE KEY UPDATE habilitado=1;
 
--- Tarifas GENERAL
+INSERT INTO plan_features (plan_id, feature_id, habilitado)
+SELECT p.id, f.id, 1
+FROM planes p
+JOIN features f ON f.codigo IN (
+  'agenda','pacientes','valoraciones','evoluciones','consentimiento',
+  'facturacion','historia_clinica','mis_tarifas','reportes_rips',
+  'tratamiento_casa','app_movil'
+)
+WHERE p.codigo IN ('PLUS','PLUS_SEMESTRAL','PLUS_ANUAL')
+ON DUPLICATE KEY UPDATE habilitado=1;
+
+INSERT INTO plan_features (plan_id, feature_id, habilitado)
+SELECT p.id, f.id, 1
+FROM planes p
+JOIN features f ON f.codigo IN (
+  'agenda','pacientes','valoraciones','evoluciones','consentimiento',
+  'facturacion','historia_clinica','mis_tarifas','reportes_rips',
+  'tratamiento_casa','app_movil','asistente_voz'
+)
+WHERE p.codigo IN ('PREMIUM','PREMIUM_SEMESTRAL','PREMIUM_ANUAL','PREMIUM_TRIAL')
+ON DUPLICATE KEY UPDATE habilitado=1;
+
+-- Tarifas GENERAL (precio = base_mensual × meses × (1 - descuento/100))
+UPDATE plan_tarifas t
+JOIN planes p ON p.id = t.plan_id
+SET t.precio = CASE p.codigo
+    WHEN 'PREMIUM_TRIAL' THEN 0.00
+    WHEN 'ESTANDAR' THEN 89000.00
+    WHEN 'ESTANDAR_SEMESTRAL' THEN 507300.00
+    WHEN 'ESTANDAR_ANUAL' THEN 961200.00
+    WHEN 'PLUS' THEN 129000.00
+    WHEN 'PLUS_SEMESTRAL' THEN 735300.00
+    WHEN 'PLUS_ANUAL' THEN 1393200.00
+    WHEN 'PREMIUM' THEN 169000.00
+    WHEN 'PREMIUM_SEMESTRAL' THEN 963300.00
+    WHEN 'PREMIUM_ANUAL' THEN 1825200.00
+    ELSE t.precio
+  END,
+  t.activo = 1
+WHERE t.segmento = 'GENERAL' AND t.vigencia_desde = '2024-01-01'
+  AND p.codigo IN (
+    'PREMIUM_TRIAL',
+    'ESTANDAR','ESTANDAR_SEMESTRAL','ESTANDAR_ANUAL',
+    'PLUS','PLUS_SEMESTRAL','PLUS_ANUAL',
+    'PREMIUM','PREMIUM_SEMESTRAL','PREMIUM_ANUAL'
+  );
+
 INSERT INTO plan_tarifas (plan_id, segmento, moneda, precio, vigencia_desde, vigencia_hasta, activo)
 SELECT p.id, 'GENERAL', 'COP',
   CASE p.codigo
-    WHEN 'MENSUAL' THEN 89000.00
-    WHEN 'SEMESTRAL' THEN 449000.00
-    WHEN 'ANUAL' THEN 790000.00
+    WHEN 'PREMIUM_TRIAL' THEN 0.00
+    WHEN 'ESTANDAR' THEN 89000.00
+    WHEN 'ESTANDAR_SEMESTRAL' THEN 507300.00
+    WHEN 'ESTANDAR_ANUAL' THEN 961200.00
+    WHEN 'PLUS' THEN 129000.00
+    WHEN 'PLUS_SEMESTRAL' THEN 735300.00
+    WHEN 'PLUS_ANUAL' THEN 1393200.00
+    WHEN 'PREMIUM' THEN 169000.00
+    WHEN 'PREMIUM_SEMESTRAL' THEN 963300.00
+    WHEN 'PREMIUM_ANUAL' THEN 1825200.00
   END,
   '2024-01-01', NULL, 1
 FROM planes p
-WHERE p.codigo IN ('MENSUAL','SEMESTRAL','ANUAL')
+WHERE p.codigo IN (
+  'PREMIUM_TRIAL',
+  'ESTANDAR','ESTANDAR_SEMESTRAL','ESTANDAR_ANUAL',
+  'PLUS','PLUS_SEMESTRAL','PLUS_ANUAL',
+  'PREMIUM','PREMIUM_SEMESTRAL','PREMIUM_ANUAL'
+)
   AND NOT EXISTS (
     SELECT 1 FROM plan_tarifas t
     WHERE t.plan_id = p.id AND t.segmento='GENERAL' AND t.vigencia_desde='2024-01-01'
   );
 
--- Tarifas PROMO
-INSERT INTO plan_tarifas (plan_id, segmento, moneda, precio, vigencia_desde, vigencia_hasta, activo)
-SELECT p.id, 'PROMO', 'COP',
-  CASE p.codigo
-    WHEN 'MENSUAL' THEN 69000.00
-    WHEN 'SEMESTRAL' THEN 399000.00
-    WHEN 'ANUAL' THEN 690000.00
-  END,
-  '2024-01-01', NULL, 1
-FROM planes p
-WHERE p.codigo IN ('MENSUAL','SEMESTRAL','ANUAL')
-  AND NOT EXISTS (
-    SELECT 1 FROM plan_tarifas t
-    WHERE t.plan_id = p.id AND t.segmento='PROMO' AND t.vigencia_desde='2024-01-01'
-  );
+-- Sin tarifas PROMO
+UPDATE plan_tarifas SET activo=0 WHERE segmento='PROMO';
 
 -- Verificación
 SELECT 'planes' AS tabla, COUNT(*) AS n FROM planes
@@ -407,25 +502,11 @@ UNION ALL SELECT 'plan_tarifas', COUNT(*) FROM plan_tarifas;
 -- #############################################################################
 
 -- =============================================================================
--- Fisiocloud — backend_agendamiento
--- BD + tablas + datos iniciales (tipos de terapia + terapeuta de prueba)
--- Equivale a migrate (+ seed mínimo). No requiere manage.py.
---
--- Uso:
---   sudo mysql -u root -p < schema_seed_agendamiento.sql
---
--- Si luego usas migrate:
---   python manage.py migrate --fake
+-- Fisiocloud — agenda (antes backend_agendamiento) → info_medica
+-- Tablas + datos iniciales (terapeuta de prueba). Tipos viven en catálogo.
 -- =============================================================================
 
-CREATE DATABASE IF NOT EXISTS fisiocloud_agendamiento
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-GRANT ALL PRIVILEGES ON fisiocloud_agendamiento.* TO 'fisiocloud'@'localhost';
-FLUSH PRIVILEGES;
-
-USE fisiocloud_agendamiento;
+USE fisiocloud_info_medica;
 
 -- -----------------------------------------------------------------------------
 -- Tablas (estado final: migraciones 0001 + 0002 + 0003)
@@ -445,9 +526,7 @@ CREATE TABLE IF NOT EXISTS tipo_terapia (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   nombre VARCHAR(80) NOT NULL,
   duracion_minutos INT UNSIGNED NOT NULL DEFAULT 45,
-  activo TINYINT(1) NOT NULL DEFAULT 1,
-  parametrizacion_id INT UNSIGNED NULL,
-  KEY tipo_terapia_parametrizacion_id (parametrizacion_id)
+  activo TINYINT(1) NOT NULL DEFAULT 1
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fisio_tipo (
@@ -505,35 +584,31 @@ CREATE TABLE IF NOT EXISTS django_migrations (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO django_migrations (app, name, applied)
-SELECT 'core', '0001_initial', UTC_TIMESTAMP(6)
-WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0001_initial');
-
-INSERT INTO django_migrations (app, name, applied)
-SELECT 'core', '0002_cita_proposito', UTC_TIMESTAMP(6)
-WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0002_cita_proposito');
-
-INSERT INTO django_migrations (app, name, applied)
-SELECT 'core', '0003_fisio_tarifas_duraciones', UTC_TIMESTAMP(6)
-WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0003_fisio_tarifas_duraciones');
+SELECT 'core', '0011_agenda_agendamiento', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0011_agenda_agendamiento'
+);
 
 -- -----------------------------------------------------------------------------
--- Datos iniciales: tipos de terapia (alineados al seed de parametrización)
--- parametrizacion_id = 1..6 asume el orden típico al sembrar parametrización
+-- Datos iniciales: tipos de terapia (catálogo compartido)
 -- -----------------------------------------------------------------------------
 
-INSERT INTO tipo_terapia (id, nombre, duracion_minutos, activo, parametrizacion_id)
+-- Especialidades clínicas (equivalente tablas legado:
+-- fisioterapia, respiratoria, fonoaudiologia, ocupacionala, ocupacionaln).
+INSERT INTO tipo_terapia (id, nombre, duracion_minutos, activo)
 VALUES
-  (1, 'Fisioterapia', 45, 1, 1),
-  (2, 'Respiratoria', 45, 1, 2),
-  (3, 'Fonoaudiología', 45, 1, 3),
-  (4, 'Ocupacional Adulto', 45, 1, 4),
-  (5, 'Ocupacional Niño', 45, 1, 5),
-  (6, 'Valoración', 60, 1, 6)
+  (1, 'Fisioterapia', 45, 1),
+  (2, 'Respiratoria', 45, 1),
+  (3, 'Fonoaudiología', 45, 1),
+  (4, 'Ocupacional Adultos', 45, 1),
+  (5, 'Ocupacional Niños', 45, 1)
 ON DUPLICATE KEY UPDATE
   nombre=VALUES(nombre),
   duracion_minutos=VALUES(duracion_minutos),
-  activo=VALUES(activo),
-  parametrizacion_id=VALUES(parametrizacion_id);
+  activo=VALUES(activo);
+
+-- Desactivar "Valoración" si existía (no es especialidad clínica)
+UPDATE tipo_terapia SET activo=0 WHERE nombre IN ('Valoración', 'Valoracion');
 
 -- Terapeuta de prueba (mismo doc/email del admin creado en seguridad)
 INSERT INTO fisioterapeutas (documento, nombre, apellido, telefono, email, activo)
@@ -551,10 +626,10 @@ INSERT INTO fisio_tipo (
   duracion_valoracion_minutos, duracion_evolucion_minutos
 )
 SELECT f.id, t.id, 1,
-  CASE t.nombre WHEN 'Valoración' THEN 80000.00 ELSE 60000.00 END,
-  CASE t.nombre WHEN 'Valoración' THEN 80000.00 ELSE 45000.00 END,
-  CASE t.nombre WHEN 'Valoración' THEN 60 ELSE 60 END,
-  CASE t.nombre WHEN 'Valoración' THEN 60 ELSE 45 END
+  80000.00,
+  45000.00,
+  60,
+  45
 FROM fisioterapeutas f
 CROSS JOIN tipo_terapia t
 WHERE f.documento = '10000001'
@@ -603,17 +678,16 @@ USE fisiocloud_info_medica;
 CREATE TABLE IF NOT EXISTS pacientes (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   terapeuta_doc VARCHAR(20) NOT NULL DEFAULT '',
-  documento VARCHAR(20) NOT NULL,
+  documento VARCHAR(14) NOT NULL,
   tipo_documento VARCHAR(10) NOT NULL DEFAULT 'CC',
   nombres VARCHAR(100) NOT NULL,
-  primer_apellido VARCHAR(80) NOT NULL DEFAULT '',
-  segundo_apellido VARCHAR(80) NOT NULL DEFAULT '',
   apellidos VARCHAR(100) NOT NULL DEFAULT '',
   fecha_nacimiento DATE NULL,
   sexo VARCHAR(10) NOT NULL DEFAULT '',
-  telefono VARCHAR(30) NOT NULL DEFAULT '',
+  telefono VARCHAR(10) NOT NULL DEFAULT '',
   email VARCHAR(254) NOT NULL DEFAULT '',
-  nacionalidad VARCHAR(40) NOT NULL DEFAULT 'Colombia',
+  direccion VARCHAR(200) NOT NULL DEFAULT '',
+  nacionalidad VARCHAR(40) NOT NULL DEFAULT 'CO',
   categoria VARCHAR(5) NOT NULL DEFAULT '',
   plan VARCHAR(80) NOT NULL DEFAULT '',
   cot_ben VARCHAR(30) NOT NULL DEFAULT '',
@@ -639,10 +713,6 @@ CREATE TABLE IF NOT EXISTS informacion (
   estado_civil VARCHAR(40) NOT NULL DEFAULT '',
   localidad VARCHAR(80) NOT NULL DEFAULT '',
   barrio VARCHAR(100) NOT NULL DEFAULT '',
-  direccion VARCHAR(200) NOT NULL DEFAULT '',
-  telefono VARCHAR(30) NOT NULL DEFAULT '',
-  celular VARCHAR(30) NOT NULL DEFAULT '',
-  email VARCHAR(254) NOT NULL DEFAULT '',
   acudiente VARCHAR(120) NOT NULL DEFAULT '',
   parentesco VARCHAR(60) NOT NULL DEFAULT '',
   telefono_acudiente VARCHAR(30) NOT NULL DEFAULT '',
@@ -895,14 +965,14 @@ WHERE NOT EXISTS (
 
 INSERT INTO pacientes (
   terapeuta_doc, documento, tipo_documento, nombres,
-  primer_apellido, segundo_apellido, apellidos,
-  fecha_nacimiento, sexo, telefono, email, nacionalidad,
+  apellidos,
+  fecha_nacimiento, sexo, telefono, email, direccion, nacionalidad,
   datos_basicos_completos, activo, creado, actualizado
 )
 SELECT
   '10000001', '1111', 'CC', 'Juan',
-  'Pérez', 'Gómez', 'Pérez Gómez',
-  '1985-05-10', 'M', '3001234567', 'juan.perez@ejemplo.com', 'Colombia',
+  'Pérez Gómez',
+  '1985-05-10', 'M', '3001234567', 'juan.perez@ejemplo.com', 'Calle 1 # 2-3', 'CO',
   1, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 FROM DUAL
 WHERE NOT EXISTS (
@@ -911,11 +981,11 @@ WHERE NOT EXISTS (
 
 INSERT INTO informacion (
   paciente_id, entidad, tipo_vinculacion, ocupacion, estado_civil,
-  localidad, barrio, direccion, telefono, celular, email,
+  localidad, barrio,
   acudiente, parentesco, telefono_acudiente, actualizado
 )
 SELECT p.id, 'Particular', 'Particular', 'Empleado', 'Soltero',
-  'Bogotá', 'Centro', 'Calle 1 # 2-3', '3001234567', '3001234567', 'juan.perez@ejemplo.com',
+  'SANTAFE', 'Centro',
   '', '', '', UTC_TIMESTAMP(6)
 FROM pacientes p
 WHERE p.terapeuta_doc='10000001' AND p.documento='1111'
@@ -947,20 +1017,12 @@ UNION ALL SELECT 'consentimientos', COUNT(*) FROM consentimientos_informados;
 -- #############################################################################
 
 -- =============================================================================
--- Fisiocloud — backend_parametrizacion
--- BD + tablas + datos (= seed_parametros)
--- Uso: sudo mysql -u root -p < schema_seed_parametrizacion.sql
--- Luego (opcional): python manage.py migrate --fake
+-- Fisiocloud — catálogos (antes backend_parametrizacion) → info_medica
+-- Tablas + datos (= seed_parametros)
 -- =============================================================================
 
-CREATE DATABASE IF NOT EXISTS fisiocloud_parametrizacion
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-GRANT ALL PRIVILEGES ON fisiocloud_parametrizacion.* TO 'fisiocloud'@'localhost';
-FLUSH PRIVILEGES;
-
-USE fisiocloud_parametrizacion;
+-- Catálogos ahora viven en fisiocloud_info_medica (ex backend_parametrizacion)
+USE fisiocloud_info_medica;
 
 -- -----------------------------------------------------------------------------
 -- Tablas
@@ -973,7 +1035,7 @@ CREATE TABLE IF NOT EXISTS parametros_sistema (
   descripcion VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS tipo_doc (
+CREATE TABLE IF NOT EXISTS tipo_documento (
   codigo VARCHAR(10) NOT NULL PRIMARY KEY,
   nombre VARCHAR(80) NOT NULL,
   activo TINYINT(1) NOT NULL DEFAULT 1
@@ -1041,15 +1103,27 @@ CREATE TABLE IF NOT EXISTS django_migrations (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO django_migrations (app, name, applied)
-SELECT v.app, v.name, UTC_TIMESTAMP(6) FROM (
-  SELECT 'core' AS app, '0001_initial' AS name UNION ALL
-  SELECT 'core', '0002_dxcie10_activo' UNION ALL
-  SELECT 'core', '0003_localidad_activo' UNION ALL
-  SELECT 'core', '0004_cups_activo' UNION ALL
-  SELECT 'core', '0005_tipodocumento_activo'
-) AS v
+SELECT 'core', '0010_catalogos_parametrizacion', UTC_TIMESTAMP(6)
 WHERE NOT EXISTS (
-  SELECT 1 FROM django_migrations dm WHERE dm.app=v.app AND dm.name=v.name
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0010_catalogos_parametrizacion'
+);
+
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0012_rename_tipo_doc_tipo_documento', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0012_rename_tipo_doc_tipo_documento'
+);
+
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0013_paciente_apellidos_unicos_validaciones', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0013_paciente_apellidos_unicos_validaciones'
+);
+
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0014_paciente_direccion_limpiar_informacion', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (
+  SELECT 1 FROM django_migrations WHERE app='core' AND name='0014_paciente_direccion_limpiar_informacion'
 );
 
 -- -----------------------------------------------------------------------------
@@ -1067,7 +1141,7 @@ INSERT INTO parametros_sistema (clave, valor, descripcion) VALUES
 ('nit', '900543896-7', '')
 ON DUPLICATE KEY UPDATE valor=VALUES(valor);
 
-INSERT INTO tipo_doc (codigo, nombre, activo) VALUES
+INSERT INTO tipo_documento (codigo, nombre, activo) VALUES
 ('CC', 'Cédula', 1),
 ('TI', 'Tarjeta identidad', 1),
 ('RC', 'Registro civil', 1),
@@ -1088,18 +1162,18 @@ INSERT INTO entidad (codigo, nombre) VALUES
 ('EPS001', 'EPS Ejemplo')
 ON DUPLICATE KEY UPDATE nombre=VALUES(nombre);
 
--- Tipos de terapia (IDs 1..6 alineados con seed de agendamiento.parametrizacion_id)
+-- Tipos de terapia (especialidades clínicas)
 INSERT INTO tipo_terapia (id, nombre, duracion_minutos, activo) VALUES
 (1, 'Fisioterapia', 45, 1),
 (2, 'Respiratoria', 45, 1),
 (3, 'Fonoaudiología', 45, 1),
-(4, 'Ocupacional Adulto', 45, 1),
-(5, 'Ocupacional Niño', 45, 1),
-(6, 'Valoración', 60, 1)
+(4, 'Ocupacional Adultos', 45, 1),
+(5, 'Ocupacional Niños', 45, 1)
 ON DUPLICATE KEY UPDATE
   nombre=VALUES(nombre),
   duracion_minutos=VALUES(duracion_minutos),
   activo=1;
+UPDATE tipo_terapia SET activo=0 WHERE nombre IN ('Valoración', 'Valoracion');
 
 DELETE FROM dxcie10 WHERE id_dx IN ('12', 'qwqw');
 
@@ -1148,7 +1222,7 @@ ON DUPLICATE KEY UPDATE diagnostico=VALUES(diagnostico), activo=1;
 
 -- Verificación
 SELECT 'parametros_sistema' AS tabla, COUNT(*) AS n FROM parametros_sistema
-UNION ALL SELECT 'tipo_doc', COUNT(*) FROM tipo_doc
+UNION ALL SELECT 'tipo_documento', COUNT(*) FROM tipo_documento
 UNION ALL SELECT 'tipo_terapia', COUNT(*) FROM tipo_terapia
 UNION ALL SELECT 'dxcie10', COUNT(*) FROM dxcie10
 UNION ALL SELECT 'estado_civil', COUNT(*) FROM estado_civil
@@ -1573,58 +1647,19 @@ UNION ALL SELECT 'voice_answers', COUNT(*) FROM voice_answers;
 -- Catálogos migrados desde el sistema anterior (fisiop_hdt)
 -- Incluidos aquí para NO requerir migrate_catalogos_legado.py
 -- =============================================================================
-USE fisiocloud_parametrizacion;
+USE fisiocloud_info_medica;
 
--- Tipos de terapia (legado → parametrización)
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo)
-SELECT 'Respiratoria', 60, 1
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Respiratoria');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1 WHERE nombre='Respiratoria';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo)
-SELECT 'Física', 60, 1
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Física');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1 WHERE nombre='Física';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo)
-SELECT 'Ocupacional', 60, 1
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Ocupacional');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1 WHERE nombre='Ocupacional';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo)
-SELECT 'Lenguaje', 60, 1
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Lenguaje');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1 WHERE nombre='Lenguaje';
+-- Tipos de terapia canónicos (no reactivar alias legado Física/Lenguaje/Ocupacional/Valoración)
+UPDATE tipo_terapia SET activo=0
+WHERE nombre IN ('Física', 'Lenguaje', 'Ocupacional', 'Valoración', 'Valoracion',
+                 'Ocupacionala', 'Ocupacionaln', 'Ocupacional Adulto', 'Ocupacional Niño',
+                 'Ocupacional A', 'Ocupacional A (dup)');
+UPDATE tipo_terapia SET nombre='Ocupacional Adultos', activo=1, duracion_minutos=45
+WHERE nombre IN ('Ocupacional Adultos', 'Ocupacional A', 'Ocupacional Adulto', 'Ocupacionala') OR id=4;
+UPDATE tipo_terapia SET nombre='Ocupacional Niños', activo=1, duracion_minutos=45
+WHERE nombre IN ('Ocupacional Niños') OR id=5;
 
--- Tipos de terapia (legado → agendamiento, con parametrizacion_id)
-USE fisiocloud_agendamiento;
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo, parametrizacion_id)
-SELECT 'Respiratoria', 60, 1,
-  (SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Respiratoria' LIMIT 1)
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Respiratoria');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1,
-  parametrizacion_id=(SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Respiratoria' LIMIT 1)
-WHERE nombre='Respiratoria';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo, parametrizacion_id)
-SELECT 'Física', 60, 1,
-  (SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Física' LIMIT 1)
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Física');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1,
-  parametrizacion_id=(SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Física' LIMIT 1)
-WHERE nombre='Física';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo, parametrizacion_id)
-SELECT 'Ocupacional', 60, 1,
-  (SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Ocupacional' LIMIT 1)
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Ocupacional');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1,
-  parametrizacion_id=(SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Ocupacional' LIMIT 1)
-WHERE nombre='Ocupacional';
-INSERT INTO tipo_terapia (nombre, duracion_minutos, activo, parametrizacion_id)
-SELECT 'Lenguaje', 60, 1,
-  (SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Lenguaje' LIMIT 1)
-WHERE NOT EXISTS (SELECT 1 FROM tipo_terapia WHERE nombre='Lenguaje');
-UPDATE tipo_terapia SET duracion_minutos=60, activo=1,
-  parametrizacion_id=(SELECT id FROM fisiocloud_parametrizacion.tipo_terapia WHERE nombre='Lenguaje' LIMIT 1)
-WHERE nombre='Lenguaje';
-
-USE fisiocloud_parametrizacion;
+USE fisiocloud_info_medica;
 -- Localidades (legado)
 INSERT INTO localidad (codigo, nombre, activo) VALUES ('ANTONIO_NARINO', 'ANTONIO NARIÑO', 1)
 ON DUPLICATE KEY UPDATE nombre=VALUES(nombre), activo=1;
@@ -14241,14 +14276,16 @@ ON DUPLICATE KEY UPDATE descripcion=VALUES(descripcion), alias=VALUES(alias), ac
 INSERT INTO cups (id_cups, descripcion, alias, activo) VALUES ('890313', 'CONSULTA DE CONTROL O DE SEGUIMIENTO POR TERAPIA OCUPACIONAL', 'TERAPIA OCUPACIONAL AMBULATORIA', 1)
 ON DUPLICATE KEY UPDATE descripcion=VALUES(descripcion), alias=VALUES(alias), activo=1;
 
-SELECT 'legado_tipos_param' AS k, COUNT(*) AS n FROM fisiocloud_parametrizacion.tipo_terapia
-UNION ALL SELECT 'legado_tipos_agenda', COUNT(*) FROM fisiocloud_agendamiento.tipo_terapia
-UNION ALL SELECT 'legado_localidad', COUNT(*) FROM fisiocloud_parametrizacion.localidad
-UNION ALL SELECT 'legado_dxcie10', COUNT(*) FROM fisiocloud_parametrizacion.dxcie10
-UNION ALL SELECT 'legado_cups', COUNT(*) FROM fisiocloud_parametrizacion.cups;
+SELECT 'legado_tipos_param' AS k, COUNT(*) AS n FROM fisiocloud_info_medica.tipo_terapia
+UNION ALL SELECT 'legado_tipos_agenda', COUNT(*) FROM fisiocloud_info_medica.tipo_terapia
+UNION ALL SELECT 'legado_localidad', COUNT(*) FROM fisiocloud_info_medica.localidad
+UNION ALL SELECT 'legado_dxcie10', COUNT(*) FROM fisiocloud_info_medica.dxcie10
+UNION ALL SELECT 'legado_cups', COUNT(*) FROM fisiocloud_info_medica.cups;
 
 SET FOREIGN_KEY_CHECKS = 1;
 FLUSH PRIVILEGES;
 
 SELECT 'Fisiocloud init completo' AS resultado;
 SHOW DATABASES LIKE 'fisiocloud_%';
+
+SET SQL_SAFE_UPDATES = 1;
