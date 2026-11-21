@@ -13,6 +13,7 @@
 --   - python manage.py seed_*
 --   - python migrate_catalogos_legado.py
 --   - migrate (usa --fake si corres migrate después)
+-- Incluye django_session en todas las BDs de backends (SessionMiddleware).
 -- =============================================================================
 
 -- Ejecutar esto desde la consola
@@ -78,6 +79,8 @@ CREATE TABLE IF NOT EXISTS usuarios (
   telefono VARCHAR(30) NOT NULL DEFAULT '',
   rol VARCHAR(20) NOT NULL DEFAULT 'TERAPEUTA',
   firma VARCHAR(100) NULL,
+  formato_hc VARCHAR(20) NOT NULL DEFAULT 'ESTANDAR',
+  ambito_trabajo VARCHAR(20) NOT NULL DEFAULT 'DOMICILIARIO',
   email_verificado TINYINT(1) NOT NULL DEFAULT 0,
   pending_plan_codigo VARCHAR(40) NOT NULL DEFAULT '',
   pending_segmento VARCHAR(40) NOT NULL DEFAULT '',
@@ -180,6 +183,42 @@ WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='000
 INSERT INTO django_migrations (app, name, applied)
 SELECT 'core', '0005_auth_email_otp', UTC_TIMESTAMP(6)
 WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0005_auth_email_otp');
+
+-- Preferencia de formato HC (idempotente en BD ya existente)
+SET @col_fmt := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'formato_hc'
+);
+SET @sql_fmt := IF(
+  @col_fmt = 0,
+  'ALTER TABLE usuarios ADD COLUMN formato_hc VARCHAR(20) NOT NULL DEFAULT ''ESTANDAR'' AFTER firma',
+  'SELECT 1'
+);
+PREPARE stmt_fmt FROM @sql_fmt;
+EXECUTE stmt_fmt;
+DEALLOCATE PREPARE stmt_fmt;
+
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0006_usuario_formato_hc', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0006_usuario_formato_hc');
+
+-- Preferencia de ámbito de trabajo (idempotente)
+SET @col_amb := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'ambito_trabajo'
+);
+SET @sql_amb := IF(
+  @col_amb = 0,
+  'ALTER TABLE usuarios ADD COLUMN ambito_trabajo VARCHAR(20) NOT NULL DEFAULT ''DOMICILIARIO'' AFTER formato_hc',
+  'SELECT 1'
+);
+PREPARE stmt_amb FROM @sql_amb;
+EXECUTE stmt_amb;
+DEALLOCATE PREPARE stmt_amb;
+
+INSERT INTO django_migrations (app, name, applied)
+SELECT 'core', '0007_usuario_ambito_trabajo', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM django_migrations WHERE app='core' AND name='0007_usuario_ambito_trabajo');
 
 SELECT 'fisiocloud_seguridad OK' AS etapa,
        (SELECT COUNT(*) FROM usuarios) AS usuarios,
@@ -371,7 +410,7 @@ ON DUPLICATE KEY UPDATE
 INSERT INTO planes (codigo, nombre, descripcion, dias_duracion, descuento_pct, activo, orden, destacado)
 VALUES
 -- Trial
-('PREMIUM_TRIAL', 'Trial Premium (15 días)', 'Trial Premium 15 días sin costo.', 15, 100.00, 1, 5, 0),
+('PREMIUM_TRIAL', 'Trial Premium (30 días)', 'Trial Premium 30 días sin costo.', 30, 100.00, 1, 5, 0),
 -- Estándar
 ('ESTANDAR', 'Plan Estándar Mensual', 'Plan Estándar Mensual. Vigencia 30 días.', 30, 0.00, 1, 10, 0),
 ('ESTANDAR_SEMESTRAL', 'Plan Estándar Semestral', 'Plan Estándar Semestral. Vigencia 180 días, descuento 5%.', 180, 5.00, 1, 11, 0),
@@ -790,6 +829,7 @@ CREATE TABLE IF NOT EXISTS valoraciones (
   datos_clinicos JSON NOT NULL,
   plan LONGTEXT NOT NULL,
   observaciones LONGTEXT NOT NULL,
+  evolucion_misma_sesion LONGTEXT NOT NULL,
   fac VARCHAR(20) NOT NULL DEFAULT '',
   grado_discapacidad VARCHAR(20) NOT NULL DEFAULT '',
   terapeuta_doc VARCHAR(20) NOT NULL DEFAULT '',
@@ -14281,6 +14321,89 @@ UNION ALL SELECT 'legado_tipos_agenda', COUNT(*) FROM fisiocloud_info_medica.tip
 UNION ALL SELECT 'legado_localidad', COUNT(*) FROM fisiocloud_info_medica.localidad
 UNION ALL SELECT 'legado_dxcie10', COUNT(*) FROM fisiocloud_info_medica.dxcie10
 UNION ALL SELECT 'legado_cups', COUNT(*) FROM fisiocloud_info_medica.cups;
+
+-- =============================================================================
+-- Django sessions (SessionMiddleware en shared/django_settings_base.py)
+-- Antes no estaba: en prod el portal /casa/<token>/ devolvía 500
+--   Table 'fisiocloud_info_medica.django_session' doesn't exist
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS fisiocloud_seguridad.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_suscripcion.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_info_medica.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_tratamiento_casa.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_soporte.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_procesos_automaticos.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fisiocloud_asistente_voz.django_session (
+  session_key VARCHAR(40) NOT NULL PRIMARY KEY,
+  session_data LONGTEXT NOT NULL,
+  expire_date DATETIME(6) NOT NULL,
+  KEY django_session_expire_date_idx (expire_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO fisiocloud_seguridad.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_seguridad.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_suscripcion.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_suscripcion.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_info_medica.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_info_medica.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_tratamiento_casa.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_tratamiento_casa.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_soporte.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_soporte.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_procesos_automaticos.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_procesos_automaticos.django_migrations WHERE app='sessions' AND name='0001_initial');
+
+INSERT INTO fisiocloud_asistente_voz.django_migrations (app, name, applied)
+SELECT 'sessions', '0001_initial', UTC_TIMESTAMP(6)
+WHERE NOT EXISTS (SELECT 1 FROM fisiocloud_asistente_voz.django_migrations WHERE app='sessions' AND name='0001_initial');
 
 SET FOREIGN_KEY_CHECKS = 1;
 FLUSH PRIVILEGES;
